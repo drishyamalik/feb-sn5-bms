@@ -1,0 +1,129 @@
+#ifndef BMS_TYPES_H
+#define BMS_TYPES_H
+
+#include <stdint.h>
+
+/* ---------------------------------------------------------------------
+ * Pack layout constants
+ *
+ * SN4's segments were built from Energus Li4P25RT modules - confirmed:
+ * this IS a "1s4p" module (4x Samsung INR18650-25R cells in parallel,
+ * one series position). NUM_SEGMENTS / MODULES_PER_SEGMENT below are
+ * still placeholders for pack size (~220 V nominal) - swap in SN5's
+ * real CAD numbers once the pack is finalized.
+ *
+ * Voltage/temp/current thresholds ARE now sourced directly from the
+ * Energus Li4P25RT datasheet (Energus Power Solutions Ltd., revision
+ * A, 2017-01-16), Table 1 "Product characteristics". Two things to
+ * know about that table before trusting it blindly:
+ *
+ *   1. It's a per-MODULE rating (one series position, 4 cells in
+ *      parallel). Because every module in this pack sits in series,
+ *      the SAME current flows through all of them - so a per-module
+ *      current rating IS the pack current rating here. That would
+ *      stop being true if SN5 uses a different P-count per module.
+ *   2. It gives separate charge and discharge limits (current AND
+ *      temperature). A flat "one threshold for everything" model is
+ *      wrong - charging tolerance is much lower than discharge
+ *      tolerance for this cell, and the datasheet's charge/discharge
+ *      temperature ceilings are 15C apart (45C vs 60C).
+ *
+ * WARN_* thresholds (the derate band before a hard fault) are NOT in
+ * the datasheet - it only states hard min/max limits, not a "back off
+ * before you get there" margin. Those are an engineering judgment
+ * call, called out as such below.
+ * ------------------------------------------------------------------- */
+#define NUM_SEGMENTS         5      /* series segments in the accumulator  */
+#define MODULES_PER_SEGMENT  12     /* 1s4p modules in series, per segment */
+#define NUM_MODULES          (NUM_SEGMENTS * MODULES_PER_SEGMENT)
+
+/* Per-module (per series position) voltage thresholds, volts.
+ * Datasheet Table 1, "Battery voltage": min 2.50, typ 3.60, max 4.20. */
+#define CELL_V_NOMINAL         3.60f
+#define CELL_V_MAX_CHARGE      4.20f   /* datasheet max - charger target  */
+#define CELL_V_OVERVOLT        4.20f   /* fault: datasheet max IS the ceiling, no headroom to give */
+#define CELL_V_UNDERVOLT_WARN  3.00f   /* judgment call: derate margin above the floor */
+#define CELL_V_UNDERVOLT       2.50f   /* fault: datasheet min, exactly   */
+
+/* Module hot-spot temperature thresholds, deg C.
+ * Datasheet Table 1, "Working temperature": Discharge -20..60, Charge 0..45.
+ * Direction (charge vs discharge) is read from pack_current_a's sign -
+ * see is_charging() in bms_fsm.c. WARN_* are judgment-call margins. */
+#define TEMP_FAULT_DISCHARGE_C  60.0f
+#define TEMP_FAULT_CHARGE_C     45.0f
+#define TEMP_WARN_DISCHARGE_C   50.0f
+#define TEMP_WARN_CHARGE_C      38.0f
+
+/* Pack current thresholds, amps, bus-level (+discharge / -charge-regen).
+ * Datasheet Table 1, "Discharge current": 120A forced-air / 60A no
+ * cooling in a pack / 180A 10-sec pulse (== the internal fuse's
+ * holding current - NOT a sustainable limit, it's "about to blow a
+ * fuse"). "Fast charge current": 20A forced-air / 15A no cooling in a
+ * pack / 120A 10-sec pulse at 50% SOC.
+ *
+ * FAULT trips at the forced-air discharge ceiling (120A) - comfortably
+ * under the 180A fuse rating, so the BMS opens the AIRs well before a
+ * fuse has a chance to blow. WARN sits at the no-cooling continuous
+ * rating (60A): if SN5's segment enclosure isn't force-air-cooled,
+ * sustained current above that should already be backing off.
+ *
+ * Regen is modeled with the SAME charge-direction limits the
+ * datasheet gives for a wall charger, since the cells don't
+ * distinguish the two - only current direction and duration matter
+ * electrochemically. This is a real simplification: regen events are
+ * short pulses, and the datasheet's 120A/10s pulse rating is much
+ * more permissive than its 15-20A continuous rating. A single
+ * instantaneous threshold (no duration tracking) can't tell "a 25A
+ * regen spike for 200ms" from "25A sustained for a minute" - so this
+ * picks the conservative continuous number rather than the permissive
+ * pulse number. A real implementation would want a timer on this the
+ * same way PRECHARGE_TIMEOUT_MS times the precharge state. */
+#define CURRENT_FAULT_A        120.0f
+#define CURRENT_WARN_A          60.0f
+#define REGEN_CURRENT_FAULT_A  -20.0f
+#define REGEN_CURRENT_WARN_A   -12.0f
+
+/* Cell-balance thresholds, volts. Not in the datasheet - judgment call. */
+#define BALANCE_DELTA_V        0.05f
+#define BALANCE_NEAR_FULL_V    4.10f
+
+/* Timing, milliseconds. */
+#define PRECHARGE_TIMEOUT_MS      2500u
+#define PRECHARGE_V_DELTA_OK      2.0f
+#define VCU_HEARTBEAT_TIMEOUT_MS  500u
+
+/* One sensor/driver snapshot fed into the FSM each control-loop tick.
+ * This is the ONLY interface between "the world" and the state
+ * machine - the FSM core never touches CAN, GPIO, or ADCs directly,
+ * which is what makes it possible to unit test without any hardware
+ * or bus simulation at all. */
+typedef struct {
+    float    cell_voltage[NUM_MODULES];  /* one reading per series module */
+    float    cell_temp_c[NUM_MODULES];   /* hot-spot sensor per module    */
+    float    pack_current_a;             /* +discharge, -charge/regen     */
+    float    bus_voltage;                /* inverter-side DC bus voltage  */
+    uint8_t  imd_ok;                     /* insulation monitoring device  */
+    uint8_t  bspd_ok;                    /* brake system plausibility dev */
+    uint8_t  selftest_ok;                /* internal diagnostics pass     */
+    uint8_t  driver_hv_request;          /* start button / ignition       */
+    uint8_t  charger_present;            /* charger seen present          */
+    uint8_t  fault_ack_request;          /* physical reset button pressed */
+    uint32_t vcu_heartbeat_age_ms;       /* time since last VCU CAN frame */
+    uint32_t now_ms;                     /* simulated clock               */
+} bms_inputs_t;
+
+/* Bitmask fault reasons, broadcast over CAN so downstream boards and
+ * the driver display know WHY the AIRs opened, not just that they did. */
+typedef enum {
+    FAULT_NONE              = 0,
+    FAULT_CELL_OVERVOLT     = 1u << 0,
+    FAULT_CELL_UNDERVOLT    = 1u << 1,
+    FAULT_OVERTEMP          = 1u << 2,
+    FAULT_OVERCURRENT       = 1u << 3,
+    FAULT_ISOLATION         = 1u << 4,
+    FAULT_PRECHARGE_TIMEOUT = 1u << 5,
+    FAULT_COMMS_LOSS        = 1u << 6,
+    FAULT_BSPD              = 1u << 7,
+} bms_fault_t;
+
+#endif /* BMS_TYPES_H */
