@@ -86,14 +86,13 @@ transition's action. Left it in the test names/history on purpose -
 it's a good example of exactly the kind of ordering bug a table-driven
 FSM makes easy to introduce and easy to catch.
 
-## What's real vs. what's still a placeholder
+## Placeholders
 
 Pack size (`NUM_SEGMENTS` / `MODULES_PER_SEGMENT`) is still a
-placeholder - swap in SN5's real CAD numbers once the pack is
-finalized.
+placeholder.
 
-Voltage, temperature, and current thresholds in `bms_types.h` are now
-sourced directly from the **Energus Li4P25RT datasheet** (Energus
+Voltage, temperature, and current thresholds in `bms_types.h` are 
+sourced from the **Energus Li4P25RT datasheet** (Energus
 Power Solutions Ltd., revision A, 2017-01-16) - the actual 1s4p module
 SN4 used, built from Samsung INR18650-25R cells. Every hard limit
 (`CELL_V_OVERVOLT`, `CELL_V_UNDERVOLT`, `TEMP_FAULT_DISCHARGE_C`,
